@@ -1,0 +1,8 @@
+pandas
+numpy
+zstandard
+scipy
+PyWavelets
+tqdm
+scipy
+matplotlib
