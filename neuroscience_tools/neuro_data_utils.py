@@ -1324,7 +1324,7 @@ def compute_trial_condition_rate(
     # Create smoothing window
     window_size = int(window_length / resolution)
     if window_type == "gaussian":
-        window = gaussian(window_size, std=window_size / 6, dtype=np.float32)
+        window = gaussian(window_size, std=window_size / 6)
     elif window_type == "square":
         window = np.ones(window_size, dtype=np.float32)
     else:
