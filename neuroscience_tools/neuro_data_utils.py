@@ -752,50 +752,73 @@ def compute_wavelet(data, fs=1000, wavelet='cmor1.5-1.0', multi_processing=-2, f
 
 # -----------------------------------------------------------------------------------------------------------------------
 
-def remove_common_artifact(data):
+def remove_common_artifact(data, mode='centered'):
     """
-    Removes common noise/artifact by subtracting the mean of the previous and next channel.
+    Removes common noise/artifact using spatial referencing.
 
     Parameters:
     - data (np.ndarray):
         - 1D (Time): Returns unchanged.
-        - 2D (Channels x Time): Modifies channels using neighbors.
-        - 3D (Trials x Channels x Time): Applies to each trial separately.
+        - 2D (Channels x Time): Applies chosen spatial referencing.
+        - 3D (Trials x Channels x Time): Applies per trial.
+    - mode (str): Type of referencing.
+        - 'centered' (default): Subtract mean of previous and next channels.
+        - 'bipolar_forward': Subtract next channel (top-down).
+        - 'bipolar_backward': Subtract previous channel (bottom-up).
 
     Returns:
-    - np.ndarray: Processed data with 2 fewer channels (if applicable), maintaining float32 dtype.
+    - np.ndarray: Processed data with reduced channels (if applicable), dtype float32.
     """
 
-    # Ensure input is float32 **ONCE**
+    # Ensure input is float32 once
     data = np.asarray(data, dtype=np.float32)
+
+    # Validate mode
+    valid_modes = ['centered', 'bipolar_forward', 'bipolar_backward']
+    if mode not in valid_modes:
+        raise ValueError(f"Invalid mode '{mode}'. Choose from {valid_modes}.")
 
     # If 1D, return as-is
     if data.ndim == 1:
         return data
 
-    # If 2D: (Channels x Time)
+    # 2D: Channels x Time
     elif data.ndim == 2:
         num_channels = data.shape[0]
 
-        # If only 2 channels, return the difference of the two
-        if num_channels == 2:
-            warnings.warn("Only 2 channels provided. Returning the difference of the two.")
-            return np.expand_dims(data[1] - data[0], axis=0)
+        if num_channels < 2:
+            raise ValueError("Need at least 2 channels for referencing.")
 
-        # Subtract mean of the previous and next channels
-        return data[1:-1] - (data[:-2] + data[2:]) / 2
+        if mode == 'centered':
+            if num_channels < 3:
+                warnings.warn("Centered mode needs at least 3 channels. Returning empty array.")
+                return np.empty((0, data.shape[1]), dtype=np.float32)
+            return data[1:-1] - (data[:-2] + data[2:]) / 2
 
-    # If 3D: (Trials x Channels x Time)
+        elif mode == 'bipolar_forward':
+            return data[:-1] - data[1:]
+
+        elif mode == 'bipolar_backward':
+            return data[1:] - data[:-1]
+
+    # 3D: Trials x Channels x Time
     elif data.ndim == 3:
         num_channels = data.shape[1]
 
-        # If only 2 channels, process each trial similarly as 2D case
-        if num_channels == 2:
-            warnings.warn("Only 2 channels provided. Returning the difference of the two for each trial.")
-            return np.expand_dims(data[:, 1, :] - data[:, 0, :], axis=1)
+        if num_channels < 2:
+            raise ValueError("Need at least 2 channels for referencing.")
 
-        # Subtract mean of the previous and next channels for each trial
-        return data[:, 1:-1, :] - (data[:, :-2, :] + data[:, 2:, :]) / 2
+        if mode == 'centered':
+            if num_channels < 3:
+                warnings.warn("Centered mode needs at least 3 channels. Returning empty array.")
+                return np.empty((data.shape[0], 0, data.shape[2]), dtype=np.float32)
+            return data[:, 1:-1, :] - (data[:, :-2, :] + data[:, 2:, :]) / 2
+
+        elif mode == 'bipolar_forward':
+            return data[:, :-1, :] - data[:, 1:, :]
+
+        elif mode == 'bipolar_backward':
+            return data[:, 1:, :] - data[:, :-1, :]
 
     else:
         raise ValueError("Input data must be 1D, 2D, or 3D.")
