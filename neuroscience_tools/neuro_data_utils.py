@@ -3,6 +3,7 @@ import pickle
 import zstandard as zstd
 import numpy as np
 import os
+
 try:
     # Preferred import for newer versions of scipy
     from scipy.signal.windows import gaussian
@@ -18,9 +19,10 @@ import concurrent.futures
 from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import interp1d
 from numba import njit
+from scipy.stats import exponnorm
+
 
 #######################################################################################################################
-
 
 
 # ======================================================================================================================
@@ -141,6 +143,7 @@ def process_psd(args):
 
     return Pxx  # ✅ No need for extra astype(np.float32)
 
+
 def process_wavelet(args):
     """
     Compute the Wavelet Transform for a single signal, ensuring float32.
@@ -195,7 +198,6 @@ def apply_filter(data, band, fs=1000, filter_type="iir", order=4):
         raise ValueError("Invalid filter_type. Use 'iir' or 'fir'.")
 
 
-
 def process_sliding_psd(args):
     """
     Compute the Power Spectral Density (PSD) for a given signal using a sliding window.
@@ -231,7 +233,6 @@ def process_sliding_psd(args):
             psd_results.append(Pxx)  # ✅ No need for redundant astype(np.float32)
 
     return np.array(psd_results, dtype=np.float32).T, f.astype(np.float32)
-
 
 
 def apply_bandstop_filter(data, fs, band, filter_type="iir", order=4):
@@ -420,10 +421,104 @@ class load_zst_file:
 
                     # Ensure float32 precision
                     data["TargetOn"][trl] = np.float32(data["Distractors"][trl, nbDistractor])
-                    data["Reaction_Time"][trl] = np.float32(data["ManetteOn"][trl] - data["Distractors"][trl, nbDistractor])
-                    data["CueToTarget_Time"][trl] = np.float32(data["Distractors"][trl, nbDistractor] - data["CueOn"][trl])
+                    data["Reaction_Time"][trl] = np.float32(
+                        data["ManetteOn"][trl] - data["Distractors"][trl, nbDistractor])
+                    data["CueToTarget_Time"][trl] = np.float32(
+                        data["Distractors"][trl, nbDistractor] - data["CueOn"][trl])
 
         return data
+
+    def Get_RT_Bounds(self, left_restriction=1, right_restriction=4, min_rt=250, max_rt=900):
+        """
+        Fits an ex-Gaussian distribution to the RT array,
+        and returns session-specific lower and upper RT thresholds.
+
+        Parameters:
+        - rt_array: array-like, the reaction times for a session
+        - min_rt: minimum RT allowed to prevent anticipatory responses (default = 200 ms)
+
+        Returns:
+        - lower_bound: RT threshold below which responses are considered anticipatory
+        - upper_bound: RT threshold above which responses are considered lapses
+        """
+        rt_array = self.Reaction_Time[np.where(self.Correct == 1)[0]]
+
+        # Fit the ex-Gaussian model
+        K, loc, scale = exponnorm.fit(rt_array)
+
+        # Convert scipy parameters to standard ex-Gaussian terms
+        mu = loc
+        sigma = scale
+        tau = K * scale
+
+        # Define bounds
+        lower_bound = max(min_rt, mu - left_restriction * sigma)
+        upper_bound = min(max_rt, mu + right_restriction * tau)
+
+        return lower_bound, upper_bound
+
+    def Recompute_by_rtBounds(self, lower_bound=None, upper_bound=None):
+
+        if lower_bound is None or upper_bound is None:
+            lower_bound, upper_bound = self.Get_RT_Bounds()
+
+        ToAbort_index = np.where(
+            (self.Correct == 1) & (self.nbDistractors == 0) & (self.Reaction_Time < lower_bound) & (
+                        self.Reaction_Time > upper_bound))[0]
+        self.Correct[ToAbort_index] = 0
+        self.Abort[ToAbort_index] = 1
+        ToAbort_index = np.where(
+            (self.Correct == 1) & (self.nbDistractors > 0) & (self.Reaction_Time > upper_bound))[0]
+        self.Correct[ToAbort_index] = 0
+        self.Abort[ToAbort_index] = 1
+
+        ToWrong_index = np.where((self.Correct == 1) & (self.nbDistractors > 0) & (self.Reaction_Time < lower_bound))[
+            0]
+        self.Correct[ToWrong_index] = 0
+        self.Wrong[ToWrong_index] = 1
+        for i in ToWrong_index:
+            last_Dist = self.Distractors[i, int(self.nbDistractors[i] - 1)]
+            last_DistPos_X = self.DistractorsPos_X[i, int(self.nbDistractors[i] - 1)]
+            last_DistPos_Y = self.DistractorsPos_Y[i, int(self.nbDistractors[i] - 1)]
+            self.TargetOn[i] = last_Dist
+            self.TargetPos_X = last_DistPos_X
+            self.TargetPos_Y = last_DistPos_Y
+
+        ToPassLeft3_index = \
+        np.where((self.Wrong == 1) & (self.nbDistractors == 3) & (self.Reaction_Time < lower_bound))[
+            0]
+        for i in ToPassLeft3_index:
+            # self.Distractors[i, int(self.nbDistractors[i] - 1)] = np.nan
+            # self.DistractorsPos_X[i, int(self.nbDistractors[i] - 1)] = np.nan
+            # self.DistractorsPos_Y[i, int(self.nbDistractors[i] - 1)] = np.nan
+            self.nbDistractors[i] -= 1
+            last_Dist = self.Distractors[i, int(self.nbDistractors[i] - 1)]
+            last_DistPos_X = self.DistractorsPos_X[i, int(self.nbDistractors[i] - 1)]
+            last_DistPos_Y = self.DistractorsPos_Y[i, int(self.nbDistractors[i] - 1)]
+            self.TargetOn[i] = last_Dist
+            self.TargetPos_X = last_DistPos_X
+            self.TargetPos_Y = last_DistPos_Y
+
+        ToPassLeft2_index = \
+            np.where((self.Wrong == 1) & (self.nbDistractors == 2) & (self.Reaction_Time < lower_bound))[
+                0]
+        for i in ToPassLeft2_index:
+            # self.Distractors[i, int(self.nbDistractors[i] - 1)] = np.nan
+            # self.DistractorsPos_X[i, int(self.nbDistractors[i] - 1)] = np.nan
+            # self.DistractorsPos_Y[i, int(self.nbDistractors[i] - 1)] = np.nan
+            self.nbDistractors[i] -= 1
+            last_Dist = self.Distractors[i, int(self.nbDistractors[i] - 1)]
+            last_DistPos_X = self.DistractorsPos_X[i, int(self.nbDistractors[i] - 1)]
+            last_DistPos_Y = self.DistractorsPos_Y[i, int(self.nbDistractors[i] - 1)]
+            self.TargetOn[i] = last_Dist
+            self.TargetPos_X = last_DistPos_X
+            self.TargetPos_Y = last_DistPos_Y
+
+        ToPassLeft1_index = \
+            np.where((self.Wrong == 1) & (self.nbDistractors == 1) & (self.Reaction_Time < lower_bound))[
+                0]
+        self.Wrong[ToPassLeft1_index] = 0
+        self.Abort[ToPassLeft1_index] = 1
 
 
 # -----------------------------------------------------------------------------------------------------------------------
@@ -477,9 +572,11 @@ def save_zst_file(data, filepath, compression_level=3, threads=None, dataframe=F
         with cctx.stream_writer(file) as writer:
             pickle.dump(data, writer, protocol=pickle.HIGHEST_PROTOCOL)
 
+
 # -----------------------------------------------------------------------------------------------------------------------
 
-def compute_firing_rate(data, fs=1000, window=30, method='Gaussian', overlap='full', multi_processing=-2, time_unit='ms'):
+def compute_firing_rate(data, fs=1000, window=30, method='Gaussian', overlap='full', multi_processing=-2,
+                        time_unit='ms'):
     """
     Compute firing rates from spike train data using a sliding window approach.
 
@@ -546,13 +643,13 @@ def compute_firing_rate(data, fs=1000, window=30, method='Gaussian', overlap='fu
         firing_rates = np.array(results, dtype=np.float32)
 
     else:
-        firing_rates = np.array(process_trial_for_compute_firing_rate((fs, window_size, method, step, factor, Data)), dtype=np.float32)
+        firing_rates = np.array(process_trial_for_compute_firing_rate((fs, window_size, method, step, factor, Data)),
+                                dtype=np.float32)
 
     # Reshape back to 4D (trials, channels, units, time)
     firing_rates = firing_rates.reshape(nb_trials, nb_channels, nb_units, -1)
 
     return firing_rates, time_points
-
 
 
 # -----------------------------------------------------------------------------------------------------------------------
@@ -593,7 +690,8 @@ def align_data_around_event(data, event_times, before, after, fs=1000, nan_paddi
         raise ValueError("Data must be 3D (LFP: trials, channels, time) or 4D (Spikes: trials, channels, units, time).")
 
     # Initialize aligned data with NaNs
-    aligned_shape = (nb_trials, nb_channels, nb_units, total_samples) if is_spiking else (nb_trials, nb_channels, total_samples)
+    aligned_shape = (nb_trials, nb_channels, nb_units, total_samples) if is_spiking else (
+    nb_trials, nb_channels, total_samples)
     aligned_data = np.full(aligned_shape, np.nan, dtype=np.float32)
 
     # Time vector centered at the event
@@ -824,7 +922,6 @@ def remove_common_artifact(data, mode='centered'):
         raise ValueError("Input data must be 1D, 2D, or 3D.")
 
 
-
 # -----------------------------------------------------------------------------------------------------------------------
 
 def compute_amplitude_modulation(signal, smoothing_sigma=5):
@@ -949,7 +1046,6 @@ def match_data_points(data1, data2):
     return resampled_data
 
 
-
 # -----------------------------------------------------------------------------------------------------------------------
 
 def concatenate_trials_without_nan(data):
@@ -974,7 +1070,6 @@ def concatenate_trials_without_nan(data):
 
     # Convert to a 2D array (channels, concatenated time points)
     return np.array(concatenated_data, dtype=np.float32)
-
 
 
 # -----------------------------------------------------------------------------------------------------------------------
@@ -1018,7 +1113,6 @@ def reconstruct_trials_from_time_info(continuous_data, trial_start_times, trial_
         reconstructed_data[i, :, :trial_length] = continuous_data[:, start_idx:end_idx]
 
     return reconstructed_data
-
 
 
 # -----------------------------------------------------------------------------------------------------------------------
@@ -1090,7 +1184,6 @@ def bandpass_filter(data, band, fs=1000, filter_type="iir", order=4, multi_proce
     return filtered_data
 
 
-
 # -----------------------------------------------------------------------------------------------------------------------
 
 
@@ -1156,7 +1249,6 @@ def compute_sliding_psd(data, fs=1000, freq_range=(1, 120), window_size=200, ste
         results = results.reshape(nb_trials, nb_channels, *results.shape[1:])
 
     return results, results[0][1].astype(np.float32), time_points
-
 
 
 # -----------------------------------------------------------------------------------------------------------------------
@@ -1274,7 +1366,8 @@ def band_remove_filter(data, band, fs=1000, filter_type="iir", order=4, multipro
     else:
         # Run sequentially
         print("Processing sequentially (no multiprocessing)...")
-        filtered_results = [apply_bandstop_filter(*arg) for arg in tqdm(args, total=len(args), desc="Filtering Progress")]
+        filtered_results = [apply_bandstop_filter(*arg) for arg in
+                            tqdm(args, total=len(args), desc="Filtering Progress")]
 
     # Convert results back to NumPy array
     filtered_data = np.array(filtered_results, dtype=np.float32)
@@ -1361,4 +1454,3 @@ def compute_trial_condition_rate(
     return time_points, trial_condition_rate.astype(np.float32)
 
 # -----------------------------------------------------------------------------------------------------------------------
-
