@@ -20,7 +20,8 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import interp1d
 from numba import njit
 from scipy.stats import exponnorm
-
+from . import superlets
+import jax.numpy as jnp
 
 #######################################################################################################################
 
@@ -166,6 +167,31 @@ def process_wavelet(args):
     return np.square(np.abs(coefficients), dtype=np.float32)
 
 
+def process_superlet(args):
+    """
+    Compute the Superlet Transform for a single signal using adaptive superlets.
+
+    Args:
+        args: Tuple containing:
+            - signal (1D np.ndarray): The input signal (e.g., a trial or channel).
+            - freqs (1D np.ndarray): Frequencies of interest.
+            - fs (int): Sampling frequency.
+            - base_cycle (int): Base number of cycles.
+            - min_order (int): Minimum superlet order.
+            - max_order (int): Maximum superlet order.
+            - mode (str): 'mul' or 'add'.
+
+    Returns:
+        np.ndarray: Superlet power (float32), shape (freqs x time).
+    """
+    signal, freqs, fs, base_cycle, min_order, max_order, mode = args
+    signal = jnp.asarray(signal, dtype=jnp.float32)
+    freqs = jnp.asarray(freqs, dtype=jnp.float32)
+
+    tfr = superlets.adaptive_superlet_transform(signal, freqs, fs, base_cycle, min_order, max_order, mode=mode)
+    return np.array(jnp.abs(tfr), dtype=np.float32)
+
+
 def apply_filter(data, band, fs=1000, filter_type="iir", order=4):
     """
     Apply a bandpass filter to a given 1D signal, ensuring float32 dtype.
@@ -186,7 +212,7 @@ def apply_filter(data, band, fs=1000, filter_type="iir", order=4):
 
     # FIR filter
     if filter_type.lower() == "fir":
-        taps = signal.firwin(order + 1, [low, high], pass_zero=False, fs=fs, dtype=np.float32)
+        taps = signal.firwin(order + 1, [low, high], pass_zero=False, fs=fs)
         return signal.lfilter(taps, 1.0, data)
 
     # IIR filter
@@ -463,12 +489,12 @@ class load_zst_file:
             lower_bound, upper_bound = self.Get_RT_Bounds()
 
         ToAbort_index = np.where(
-            (self.Correct == 1) & (self.nbDistractors == 0) & (self.Reaction_Time < lower_bound) & (
-                        self.Reaction_Time > upper_bound))[0]
+            (self.Correct == 1) & (self.nbDistractors == 0) & (self.Reaction_Time < lower_bound))[0]
         self.Correct[ToAbort_index] = 0
         self.Abort[ToAbort_index] = 1
+
         ToAbort_index = np.where(
-            (self.Correct == 1) & (self.nbDistractors > 0) & (self.Reaction_Time > upper_bound))[0]
+            (self.Correct == 1) & (self.nbDistractors >= 0) & (self.Reaction_Time > upper_bound))[0]
         self.Correct[ToAbort_index] = 0
         self.Abort[ToAbort_index] = 1
 
@@ -485,12 +511,15 @@ class load_zst_file:
             self.TargetPos_Y = last_DistPos_Y
 
         ToPassLeft3_index = \
-        np.where((self.Wrong == 1) & (self.nbDistractors == 3) & (self.Reaction_Time < lower_bound))[
-            0]
+            np.where((self.Wrong == 1) & (self.nbDistractors == 3) & (self.Reaction_Time > upper_bound))[0]
+        self.Wrong[ToPassLeft3_index] = 0
+        self.Abort[ToPassLeft3_index] = 1
+        ToPassLeft3_index = \
+        np.where((self.Wrong == 1) & (self.nbDistractors == 3) & (self.Reaction_Time < lower_bound))[0]
         for i in ToPassLeft3_index:
-            # self.Distractors[i, int(self.nbDistractors[i] - 1)] = np.nan
-            # self.DistractorsPos_X[i, int(self.nbDistractors[i] - 1)] = np.nan
-            # self.DistractorsPos_Y[i, int(self.nbDistractors[i] - 1)] = np.nan
+            self.Distractors[i, int(self.nbDistractors[i] - 1)] = np.nan
+            self.DistractorsPos_X[i, int(self.nbDistractors[i] - 1)] = np.nan
+            self.DistractorsPos_Y[i, int(self.nbDistractors[i] - 1)] = np.nan
             self.nbDistractors[i] -= 1
             last_Dist = self.Distractors[i, int(self.nbDistractors[i] - 1)]
             last_DistPos_X = self.DistractorsPos_X[i, int(self.nbDistractors[i] - 1)]
@@ -500,12 +529,15 @@ class load_zst_file:
             self.TargetPos_Y = last_DistPos_Y
 
         ToPassLeft2_index = \
-            np.where((self.Wrong == 1) & (self.nbDistractors == 2) & (self.Reaction_Time < lower_bound))[
-                0]
+            np.where((self.Wrong == 1) & (self.nbDistractors == 2) & (self.Reaction_Time > upper_bound))[0]
+        self.Wrong[ToPassLeft2_index] = 0
+        self.Abort[ToPassLeft2_index] = 1
+        ToPassLeft2_index = \
+            np.where((self.Wrong == 1) & (self.nbDistractors == 2) & (self.Reaction_Time < lower_bound))[0]
         for i in ToPassLeft2_index:
-            # self.Distractors[i, int(self.nbDistractors[i] - 1)] = np.nan
-            # self.DistractorsPos_X[i, int(self.nbDistractors[i] - 1)] = np.nan
-            # self.DistractorsPos_Y[i, int(self.nbDistractors[i] - 1)] = np.nan
+            self.Distractors[i, int(self.nbDistractors[i] - 1)] = np.nan
+            self.DistractorsPos_X[i, int(self.nbDistractors[i] - 1)] = np.nan
+            self.DistractorsPos_Y[i, int(self.nbDistractors[i] - 1)] = np.nan
             self.nbDistractors[i] -= 1
             last_Dist = self.Distractors[i, int(self.nbDistractors[i] - 1)]
             last_DistPos_X = self.DistractorsPos_X[i, int(self.nbDistractors[i] - 1)]
@@ -515,8 +547,11 @@ class load_zst_file:
             self.TargetPos_Y = last_DistPos_Y
 
         ToPassLeft1_index = \
-            np.where((self.Wrong == 1) & (self.nbDistractors == 1) & (self.Reaction_Time < lower_bound))[
-                0]
+            np.where((self.Wrong == 1) & (self.nbDistractors == 1) & (self.Reaction_Time < lower_bound))[0]
+        self.Wrong[ToPassLeft1_index] = 0
+        self.Abort[ToPassLeft1_index] = 1
+        ToPassLeft1_index = \
+            np.where((self.Wrong == 1) & (self.nbDistractors == 1) & (self.Reaction_Time > upper_bound))[0]
         self.Wrong[ToPassLeft1_index] = 0
         self.Abort[ToPassLeft1_index] = 1
 
@@ -1050,25 +1085,32 @@ def match_data_points(data1, data2):
 
 def concatenate_trials_without_nan(data):
     """
-    Convert trial-based data (trials, channels, time points) into continuous session data (channels, time points),
-    ensuring float32 dtype.
+    Convert trial-based data into continuous session data while removing NaNs and preserving float32 dtype.
+
+    Supports:
+    - 3D input: (trials, channels, time points)
+    - 2D input: (trials, time points) → treated as (trials, 1 channel, time)
 
     Parameters:
-    - data (np.ndarray): A 3D array of shape (trials, channels, time points).
+    - data (np.ndarray): Input array of shape (trials, channels, time) or (trials, time).
 
     Returns:
-    - np.ndarray: A 2D array of shape (channels, concatenated time points) in float32.
+    - np.ndarray: Output of shape (channels, concatenated time points) in float32.
     """
-    if data.ndim != 3:
-        raise ValueError("Input data must be a 3D array (trials, channels, time points).")
-
-    # Ensure input is float32 **ONCE**
     data = np.asarray(data, dtype=np.float32)
 
-    # Remove NaN values and concatenate across trials for each channel
-    concatenated_data = [data[:, ch, :].ravel()[~np.isnan(data[:, ch, :].ravel())] for ch in range(data.shape[1])]
+    if data.ndim == 2:
+        # (trials, time) → reshape to (trials, 1, time)
+        data = data[:, np.newaxis, :]
+    elif data.ndim != 3:
+        raise ValueError("Input data must be either 2D (trials × time) or 3D (trials × channels × time).")
 
-    # Convert to a 2D array (channels, concatenated time points)
+    # Concatenate across trials for each channel, removing NaNs
+    concatenated_data = [
+        data[:, ch, :].ravel()[~np.isnan(data[:, ch, :].ravel())]
+        for ch in range(data.shape[1])
+    ]
+
     return np.array(concatenated_data, dtype=np.float32)
 
 
@@ -1381,64 +1423,135 @@ def band_remove_filter(data, band, fs=1000, filter_type="iir", order=4, multipro
 
 # -----------------------------------------------------------------------------------------------------------------------
 
+# def compute_trial_condition_rate(
+#         start_trials: np.ndarray,
+#         trial_durations: np.ndarray,
+#         trial_condition_mask: np.ndarray,  # ✅ Renamed for clarity
+#         window_length: float = 30.0,
+#         window_type: str = "gaussian",
+#         unit_time: str = "sec",
+#         resolution: float = 0.1,
+# ) -> tuple[np.ndarray, np.ndarray]:
+#     """
+#     Compute time-resolved rate of trials that match a given condition.
+#
+#     Parameters:
+#     - start_trials (np.ndarray): Start times of trials in milliseconds or seconds.
+#     - trial_durations (np.ndarray): Durations of trials in milliseconds or seconds.
+#     - trial_condition_mask (np.ndarray): Boolean mask (0 or 1) indicating whether a trial matches the condition.
+#     - window_length (float): Length of the smoothing window in seconds (default: 30.0 sec).
+#     - window_type (str): Type of the smoothing window ("gaussian" or "square").
+#     - unit_time (str): "ms" (convert to sec) or "sec" (default).
+#     - resolution (float): Time step resolution in seconds (default: 0.1 sec).
+#
+#     Returns:
+#     - time_points (np.ndarray): Time points corresponding to the computed rates.
+#     - trial_condition_rate (np.ndarray): Time-resolved rate of trials matching the condition.
+#     """
+#     # Convert to seconds if needed
+#     if unit_time == "ms":
+#         start_trials = start_trials.astype(np.float32) / 1000.0
+#         trial_durations = trial_durations.astype(np.float32) / 1000.0
+#         window_length /= 1000.0
+#         resolution /= 1000.0
+#     else:
+#         start_trials = start_trials.astype(np.float32)
+#         trial_durations = trial_durations.astype(np.float32)
+#
+#     # Filter trials that match the condition
+#     matching_trials = trial_condition_mask.astype(bool)
+#     start_trials = start_trials[matching_trials]
+#     trial_durations = trial_durations[matching_trials]
+#
+#     # Handle edge case: No trials match the condition
+#     if len(start_trials) == 0:
+#         time_points = np.arange(0, 1, resolution, dtype=np.float32)  # Dummy time axis
+#         return time_points, np.zeros_like(time_points, dtype=np.float32)
+#
+#     # Define time axis
+#     time_min = np.min(start_trials)
+#     time_max = np.max(start_trials + trial_durations)
+#     time_points = np.arange(time_min, time_max, resolution, dtype=np.float32)
+#
+#     # Create event array (vectorized approach)
+#     trial_events = np.zeros_like(time_points, dtype=np.float32)
+#     for t_start, t_duration in zip(start_trials, trial_durations):
+#         trial_mask = (time_points >= t_start) & (time_points < t_start + t_duration)
+#         trial_events += trial_mask.astype(np.float32)  # ✅ Vectorized update
+#
+#     # Create smoothing window
+#     window_size = int(window_length / resolution)
+#     if window_type == "gaussian":
+#         window = gaussian(window_size, std=window_size / 6)
+#     elif window_type == "square":
+#         window = np.ones(window_size, dtype=np.float32)
+#     else:
+#         raise ValueError("Unsupported window type. Use 'gaussian' or 'square'.")
+#
+#     window /= np.sum(window)  # Normalize
+#
+#     # Convolve to smooth rate
+#     trial_condition_rate = convolve(trial_events, window, mode='same', method='auto')
+#
+#     return time_points, trial_condition_rate.astype(np.float32)
+
+
 def compute_trial_condition_rate(
         start_trials: np.ndarray,
         trial_durations: np.ndarray,
-        trial_condition_mask: np.ndarray,  # ✅ Renamed for clarity
-        window_length: float = 30.0,
+        trial_condition_mask: np.ndarray,
+        window_length: float = 60000.0,  # in ms
         window_type: str = "gaussian",
-        unit_time: str = "sec",
-        resolution: float = 0.1,
+        output_fs: float = 1.0,  # Hz
+        data_dur: float = None  # Total duration of data in ms (optional)
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Compute time-resolved rate of trials that match a given condition.
+    Compute time-resolved rate of trials that match a given condition (in ms).
 
     Parameters:
-    - start_trials (np.ndarray): Start times of trials in milliseconds or seconds.
-    - trial_durations (np.ndarray): Durations of trials in milliseconds or seconds.
-    - trial_condition_mask (np.ndarray): Boolean mask (0 or 1) indicating whether a trial matches the condition.
-    - window_length (float): Length of the smoothing window in seconds (default: 30.0 sec).
-    - window_type (str): Type of the smoothing window ("gaussian" or "square").
-    - unit_time (str): "ms" (convert to sec) or "sec" (default).
-    - resolution (float): Time step resolution in seconds (default: 0.1 sec).
+    - start_trials (np.ndarray): Trial start times in ms.
+    - trial_durations (np.ndarray): Trial durations in ms.
+    - trial_condition_mask (np.ndarray): Boolean mask (0 or 1) for matching trials.
+    - window_length (float): Smoothing window length in ms (default: 60000 ms).
+    - window_type (str): "gaussian" or "square".
+    - output_fs (float): Output sampling frequency in Hz (default: 1 Hz).
+    - data_dur (float or None): Total duration of data in ms (optional).
 
     Returns:
-    - time_points (np.ndarray): Time points corresponding to the computed rates.
-    - trial_condition_rate (np.ndarray): Time-resolved rate of trials matching the condition.
+    - time_points (np.ndarray): Time points in ms.
+    - trial_condition_rate (np.ndarray): Smoothed rate signal.
     """
-    # Convert to seconds if needed
-    if unit_time == "ms":
-        start_trials = start_trials.astype(np.float32) / 1000.0
-        trial_durations = trial_durations.astype(np.float32) / 1000.0
-        window_length /= 1000.0
-        resolution /= 1000.0
-    else:
-        start_trials = start_trials.astype(np.float32)
-        trial_durations = trial_durations.astype(np.float32)
 
-    # Filter trials that match the condition
+    # Filter matching trials
     matching_trials = trial_condition_mask.astype(bool)
-    start_trials = start_trials[matching_trials]
-    trial_durations = trial_durations[matching_trials]
+    start_trials = start_trials[matching_trials].astype(np.float32)
+    trial_durations = trial_durations[matching_trials].astype(np.float32)
 
-    # Handle edge case: No trials match the condition
+    # Define time resolution based on output_fs
+    resolution = int(1000 / output_fs)
+
+    # Handle case where no trials match
     if len(start_trials) == 0:
-        time_points = np.arange(0, 1, resolution, dtype=np.float32)  # Dummy time axis
+        default_dur = data_dur if data_dur is not None else 10000  # 10 sec default
+        time_points = np.arange(0, default_dur, resolution, dtype=np.float32)
         return time_points, np.zeros_like(time_points, dtype=np.float32)
 
     # Define time axis
-    time_min = np.min(start_trials)
-    time_max = np.max(start_trials + trial_durations)
-    time_points = np.arange(time_min, time_max, resolution, dtype=np.float32)
+    time_min = 0
+    time_max = data_dur if data_dur is not None else np.max(start_trials + trial_durations)
+    time_points = np.arange(time_min, time_max + resolution, resolution, dtype=np.float32)
 
-    # Create event array (vectorized approach)
+    # Build binary trial presence vector
     trial_events = np.zeros_like(time_points, dtype=np.float32)
     for t_start, t_duration in zip(start_trials, trial_durations):
         trial_mask = (time_points >= t_start) & (time_points < t_start + t_duration)
-        trial_events += trial_mask.astype(np.float32)  # ✅ Vectorized update
+        trial_events[trial_mask] = 1.0
 
     # Create smoothing window
     window_size = int(window_length / resolution)
+    if window_size < 1:
+        window_size = 1
+
     if window_type == "gaussian":
         window = gaussian(window_size, std=window_size / 6)
     elif window_type == "square":
@@ -1446,11 +1559,71 @@ def compute_trial_condition_rate(
     else:
         raise ValueError("Unsupported window type. Use 'gaussian' or 'square'.")
 
-    window /= np.sum(window)  # Normalize
+    window /= np.sum(window)
 
-    # Convolve to smooth rate
+    # Convolve to get smoothed rate
     trial_condition_rate = convolve(trial_events, window, mode='same', method='auto')
 
     return time_points, trial_condition_rate.astype(np.float32)
+# -----------------------------------------------------------------------------------------------------------------------
+def compute_superlet(data, fs=1000, base_cycle=3, min_order=1, max_order=10,
+                     mode='mul', multi_processing=-2, freq_range=None, freq_res=None,
+                     time_unit='ms', time_window=None):
+    """
+    Compute Superlet Transform of LFP data using multiprocessing and return power.
 
+    Args:
+        data (np.ndarray): 1D, 2D, or 3D array where the last dimension is time.
+        fs (int, optional): Sampling frequency (Hz). Defaults to 1000.
+        base_cycle (int): Number of cycles at base order.
+        min_order (int): Minimum superlet order.
+        max_order (int): Maximum superlet order.
+        mode (str): 'mul' or 'add' for superlet scaling.
+        multi_processing (int): -1 for all cores, -2 for all but one, 0 for no multiprocessing.
+        freq_range (tuple, optional): (low, high) in Hz.
+        freq_res (float, optional): Frequency resolution in Hz.
+        time_unit (str): Time unit for returned time array.
+        time_window (tuple, optional): Time range.
+
+    Returns:
+        np.ndarray: Superlet power (float32).
+        np.ndarray: Frequencies.
+        np.ndarray: Time points.
+    """
+    # Ensure float32 once
+    data = np.asarray(data, dtype=np.float32)
+
+    # Frequency setup
+    freq_range = freq_range or (1, 120)
+    freq_res = freq_res or 1
+    freqs = np.linspace(freq_range[0], freq_range[1],
+                        int((freq_range[1] - freq_range[0]) / freq_res)).astype(np.float32)
+
+    # Reshape if 3D
+    mode_3D = data.ndim == 3
+    if mode_3D:
+        nb_trials, nb_channels, data_points = data.shape
+        data = data.reshape(nb_trials * nb_channels, data_points)
+
+    # Time vector
+    times = compute_time_points(data.shape[-1], fs=fs, time_unit=time_unit, time_window=time_window)
+
+    args = [(row, freqs, fs, base_cycle, min_order, max_order, mode) for row in data]
+
+    # Compute
+    if multi_processing == 0:
+        results = [process_superlet(arg) for arg in tqdm(args, total=len(args), desc="Superlet computation")]
+    else:
+        num_workers = max(1, os.cpu_count() - 1 if multi_processing == -2 else os.cpu_count())
+        with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+            results = list(tqdm(executor.map(process_superlet, args),
+                                total=len(args), desc="Superlet computation"))
+
+    results = np.array(results, dtype=np.float32)
+
+    # Restore shape
+    if mode_3D:
+        results = results.reshape(nb_trials, nb_channels, *results.shape[1:])
+
+    return results, freqs.astype(np.float32), times.astype(np.float32)
 # -----------------------------------------------------------------------------------------------------------------------

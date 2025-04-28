@@ -12,7 +12,9 @@ setup(
         "PyWavelets",
         "tqdm",
         "scipy",
-        "matplotlib"
+        "matplotlib",
+        'jax',
+        'jaxlib',
     ],
     author="Mojtaba",
     author_email="mojtaba.alavi@isc.cnrs.fr",

@@ -6,3 +6,5 @@ PyWavelets
 tqdm
 scipy
 matplotlib
+jax
+jaxlib

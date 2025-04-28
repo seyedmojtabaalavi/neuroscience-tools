@@ -1,8 +1,10 @@
 README.md
 setup.py
 neuroscience_tools/__init__.py
+neuroscience_tools/morlet.py
 neuroscience_tools/neuro_data_utils.py
 neuroscience_tools/neuro_plot_utils.py
+neuroscience_tools/superlets.py
 neuroscience_tools.egg-info/PKG-INFO
 neuroscience_tools.egg-info/SOURCES.txt
 neuroscience_tools.egg-info/dependency_links.txt
