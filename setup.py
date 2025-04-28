@@ -15,6 +15,7 @@ setup(
         "matplotlib",
         'jax',
         'jaxlib',
+        'git+https://github.com/irhum/superlets.git'
     ],
     author="Mojtaba",
     author_email="mojtaba.alavi@isc.cnrs.fr",
