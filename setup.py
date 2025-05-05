@@ -11,12 +11,13 @@ setup(
         "scipy",
         "PyWavelets",
         "tqdm",
-        "scipy",
-        "matplotlib",
-        'jax',
-        'jaxlib',
-        'git+https://github.com/irhum/superlets.git'
+        "matplotlib"
     ],
+    extras_require={
+        "gpu": [
+            "jax",
+            "jaxlib",
+            "git+https://github.com/irhum/superlets.git"]},
     author="Mojtaba",
     author_email="mojtaba.alavi@isc.cnrs.fr",
     description="A Python package for handling neuroscience data with Zstandard compression.",

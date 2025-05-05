@@ -20,8 +20,15 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import interp1d
 from numba import njit
 from scipy.stats import exponnorm
-from . import superlets
-import jax.numpy as jnp
+try:
+    import jax
+    import jax.numpy as jnp
+except ImportError:
+    print("⚠️  JAX is not installed. GPU-based functions like superlet will not work.")
+try:
+    from . import superlets
+except:
+    pass
 
 #######################################################################################################################
 
@@ -607,6 +614,32 @@ def save_zst_file(data, filepath, compression_level=3, threads=None, dataframe=F
         with cctx.stream_writer(file) as writer:
             pickle.dump(data, writer, protocol=pickle.HIGHEST_PROTOCOL)
 
+# ----------------------------------------------------------------------------------------------------------------------
+
+def load_zst_file(filepath, dataframe=False):
+    """
+    Load data from a .zst (Zstandard-compressed) file.
+
+    Args:
+        filepath (str): Path to the .zst file.
+        dataframe (bool): If True, expects a pickled pandas DataFrame.
+                          If False, expects JSON or NumPy-compatible structure.
+
+    Returns:
+        Loaded data (dict, np.ndarray, or pd.DataFrame)
+    """
+    with open(filepath, 'rb') as f:
+        dctx = zstd.ZstdDecompressor()
+        with dctx.stream_reader(f) as reader:
+            decompressed = reader.read()
+
+    if dataframe:
+        return pickle.loads(decompressed)
+
+    try:
+        return json.loads(decompressed.decode('utf-8'))
+    except UnicodeDecodeError:
+        return np.load(decompressed, allow_pickle=True)
 
 # -----------------------------------------------------------------------------------------------------------------------
 
