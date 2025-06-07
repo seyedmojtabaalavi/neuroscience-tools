@@ -1,5 +1,5 @@
-Metadata-Version: 2.1
-Name: neuroscience-tools
+Metadata-Version: 2.4
+Name: neuroscience_tools
 Version: 0.1
 Summary: A Python package for handling neuroscience data with Zstandard compression.
 Author: Mojtaba
@@ -9,3 +9,18 @@ Classifier: Programming Language :: Python :: 3
 Classifier: License :: OSI Approved :: MIT License
 Classifier: Operating System :: OS Independent
 Requires-Python: >=3.12
+Requires-Dist: pandas
+Requires-Dist: numpy
+Requires-Dist: zstandard
+Requires-Dist: scipy
+Requires-Dist: PyWavelets
+Requires-Dist: tqdm
+Requires-Dist: matplotlib
+Requires-Dist: natsort
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: license
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

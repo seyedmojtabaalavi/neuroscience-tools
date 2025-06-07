@@ -4,7 +4,5 @@ zstandard
 scipy
 PyWavelets
 tqdm
-scipy
 matplotlib
-jax
-jaxlib
+natsort

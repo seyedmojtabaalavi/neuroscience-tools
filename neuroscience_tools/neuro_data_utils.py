@@ -3,7 +3,10 @@ import pickle
 import zstandard as zstd
 import numpy as np
 import os
-
+try:
+    import json
+except:
+    pass
 try:
     # Preferred import for newer versions of scipy
     from scipy.signal.windows import gaussian
@@ -11,7 +14,7 @@ except ImportError:
     # Fallback for older versions
     from scipy.signal import gaussian
 from scipy import signal
-from scipy.signal import welch, hilbert, find_peaks, convolve
+from scipy.signal import welch, hilbert, find_peaks, convolve, windows
 import pywt
 from tqdm import tqdm
 import warnings
@@ -29,6 +32,9 @@ try:
     from . import superlets
 except:
     pass
+import io
+from pathlib import Path
+from typing import Any
 
 #######################################################################################################################
 
@@ -95,6 +101,35 @@ def process_trial_for_compute_firing_rate(args):
     kernel /= kernel.sum()
     firing_rate = np.convolve(spikes, kernel, mode='same')[::step]
     return firing_rate
+
+
+def convert_to_float32(obj):
+    """
+    Recursively convert all numeric numpy arrays and pandas DataFrames to np.float32 in nested structures.
+    """
+    import numpy as np
+    import pandas as pd
+
+    if isinstance(obj, np.ndarray) and np.issubdtype(obj.dtype, np.number):
+        return obj.astype(np.float32)
+
+    elif isinstance(obj, pd.DataFrame):
+        obj = obj.copy()  # avoid modifying original
+        numeric_cols = obj.select_dtypes(include=[np.number]).columns
+        obj[numeric_cols] = obj[numeric_cols].astype(np.float32)
+        return obj
+
+    elif isinstance(obj, dict):
+        return {k: convert_to_float32(v) for k, v in obj.items()}
+
+    elif isinstance(obj, list):
+        return [convert_to_float32(v) for v in obj]
+
+    elif isinstance(obj, tuple):
+        return tuple(convert_to_float32(v) for v in obj)
+
+    else:
+        return obj
 
 
 def compute_time_points(data_points, fs=1000, time_unit='ms', time_window=None):
@@ -265,7 +300,7 @@ def process_sliding_psd(args):
         else:
             psd_results.append(Pxx)  # ✅ No need for redundant astype(np.float32)
 
-    return np.array(psd_results, dtype=np.float32).T, f.astype(np.float32)
+    return np.array(psd_results, dtype=np.float32).T #, f.astype(np.float32)
 
 
 def apply_bandstop_filter(data, fs, band, filter_type="iir", order=4):
@@ -490,6 +525,79 @@ class load_zst_file:
 
         return lower_bound, upper_bound
 
+    def make_only_behavior(self):
+        self.FEF_LFP = None
+        self.LIP_LFP = None
+        self.FEF_MUA = None
+        self.LIP_MUA = None
+        self.FEF_Spike = None
+        self.LIP_Spike = None
+        self.Eye_Pupil = None
+        self.Eye_X = None
+        self.Eye_Y = None
+        self.Eye_plx_Pupil = None
+        self.Eye_plx_X = None
+        self.Eye_plx_Y = None
+        self.Unit_MetaData = None
+        self.LFP_MetaData = None
+
+    def make_only_behavior_and_Eye(self):
+        self.FEF_LFP = None
+        self.LIP_LFP = None
+        self.FEF_MUA = None
+        self.LIP_MUA = None
+        self.FEF_Spike = None
+        self.LIP_Spike = None
+        self.Eye_Pupil = None
+        # self.Eye_X = None
+        # self.Eye_Y = None
+        # self.Eye_plx_Pupil = None
+        # self.Eye_plx_X = None
+        # self.Eye_plx_Y = None
+        self.Unit_MetaData = None
+        self.LFP_MetaData = None
+
+    def interpolate_eye_data_with_blink_detection(self, min_size=1.5, padding_ms=100, sampling_rate=1000):
+
+        def flatten(sig):
+            return sig.reshape(-1)
+
+        def reshape(sig):
+            return sig.reshape(self.Eye_Pupil.shape)
+
+        # Step 1: Flatten
+        pupil_flat = flatten(self.Eye_Pupil)
+        if self.Eye_X is not None: eye_x_flat = flatten(self.Eye_X)
+        if self.Eye_Y is not None: eye_y_flat = flatten(self.Eye_Y)
+
+        # Step 2: Detect blink-related dips
+        blink_mask = pupil_flat < min_size
+        blink_mask |= np.isnan(pupil_flat)
+
+        # Step 3: Expand blink regions
+        padding_samples = int(padding_ms * sampling_rate / 1000)
+        expanded_mask = np.copy(blink_mask)
+        for i in np.where(blink_mask)[0]:
+            start = max(0, i - padding_samples)
+            end = min(len(pupil_flat), i + padding_samples + 1)
+            expanded_mask[start:end] = True
+
+        # Step 4: Interpolation helper
+        def interpolate_signal(signal, mask):
+            signal = signal.copy()
+            signal[mask] = np.nan
+            return pd.Series(signal).interpolate(limit_direction='both').to_numpy()
+
+        # Step 5: Interpolate
+        clean_pupil = interpolate_signal(pupil_flat, expanded_mask)
+        clean_x = interpolate_signal(eye_x_flat, expanded_mask) if self.Eye_X is not None else None
+        clean_y = interpolate_signal(eye_y_flat, expanded_mask) if self.Eye_Y is not None else None
+
+        self.Eye_Pupil = reshape(clean_pupil)
+        self.Eye_X = reshape(clean_x)
+        self.Eye_Y = reshape(clean_y)
+
+
     def Recompute_by_rtBounds(self, lower_bound=None, upper_bound=None):
 
         if lower_bound is None or upper_bound is None:
@@ -565,48 +673,27 @@ class load_zst_file:
 
 # -----------------------------------------------------------------------------------------------------------------------
 
-def save_zst_file(data, filepath, compression_level=3, threads=None, dataframe=False):
+def save_zst_file(data, filepath, compression_level=3, threads=None):
     """
-    Save data (dictionary, pandas DataFrame, or numpy array) to a .zst file compressed with zstandard.
+    Save data to a .zst file with zstandard compression and convert all numeric data to float32.
 
     Args:
         data (dict, pd.DataFrame, or np.ndarray): The data to be saved.
-        filepath (str): Path to save the .zst file.
-        compression_level (int): Compression level (1-22, where 1 is fastest, 22 is maximum compression).
-        threads (int, optional): Number of threads to use for compression. Defaults to max available - 1.
-        dataframe (bool, optional): Whether to convert data to a pandas DataFrame before saving (default: False).
+        filepath (str or Path): Path to save the .zst file.
+        compression_level (int): Compression level (1–22).
+        threads (int, optional): Number of threads to use for compression.
     """
     if data is None:
         raise ValueError("Input data is None. Cannot save an empty file.")
 
-    # ✅ Ensure float32 for NumPy arrays
-    if isinstance(data, np.ndarray):
-        data = np.asarray(data, dtype=np.float32)
-        if dataframe:
-            data = pd.DataFrame(data)
+    # ✅ Convert all numeric data to float32 recursively
+    data = convert_to_float32(data)
 
-    # ✅ Ensure float32 for numeric columns in Pandas DataFrame
-    elif isinstance(data, pd.DataFrame):
-        if dataframe:
-            numeric_cols = data.select_dtypes(include=[np.number]).columns
-            data[numeric_cols] = data[numeric_cols].astype(np.float32)
+    # ✅ Ensure output directory exists
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    # ✅ Ensure float32 for NumPy arrays inside dictionaries
-    elif isinstance(data, dict):
-        for key in data:
-            if isinstance(data[key], np.ndarray):
-                data[key] = data[key].astype(np.float32)
-        if dataframe:
-            data = pd.DataFrame(data)
-
-    else:
-        raise ValueError("Input data must be a dictionary, pandas DataFrame, or numpy array.")
-
-    # ✅ Determine optimal number of threads if not provided
     threads = threads or max(1, os.cpu_count() - 1)
-
-    # ✅ Ensure save directory exists
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
     # ✅ Save with zstandard compression
     with open(filepath, 'wb') as file:
@@ -614,32 +701,115 @@ def save_zst_file(data, filepath, compression_level=3, threads=None, dataframe=F
         with cctx.stream_writer(file) as writer:
             pickle.dump(data, writer, protocol=pickle.HIGHEST_PROTOCOL)
 
+
+# ----------------------------------------------------------------------------------------------------------------------
+# def get_pickle_size(obj):
+#     return len(pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL))
+
+def save_general_object_zst_auto_chunk(obj, save_dir, prefix="data", chunk_size_bytes=8 * 1024**3):
+    """
+    Save any Python object into compressed .zst chunks with metadata.
+
+    Args:
+        obj: Any serializable Python object.
+        save_dir: Directory to save chunks and metadata.
+        prefix: File prefix.
+        chunk_size_bytes: Max size of each chunk (default: 250MB).
+    """
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Serialize the object
+    pickled_data = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+
+    # 2. Split into chunks
+    num_chunks = (len(pickled_data) + chunk_size_bytes - 1) // chunk_size_bytes
+    compressor = zstd.ZstdCompressor(level=10)
+
+    for i in range(num_chunks):
+        chunk = pickled_data[i * chunk_size_bytes : (i + 1) * chunk_size_bytes]
+        chunk_path = save_dir / f"{prefix}_chunk_{i:04d}.zst"
+        with open(chunk_path, "wb") as f:
+            f.write(compressor.compress(chunk))
+
+    # 3. Save metadata
+    meta = {
+        "prefix": prefix,
+        "total_chunks": num_chunks,
+        "protocol": pickle.HIGHEST_PROTOCOL,
+        "chunk_size_bytes": chunk_size_bytes,
+        "compressor": "zstd",
+    }
+    meta_path = save_dir / f"{prefix}_meta.zst"
+    with open(meta_path, "wb") as f:
+        f.write(compressor.compress(pickle.dumps(meta)))
+
+    print(f"✅ Saved {num_chunks} chunks + metadata to '{save_dir}'")
+
+
 # ----------------------------------------------------------------------------------------------------------------------
 
-def load_zst_file(filepath, dataframe=False):
+def load_zst(filepath):
     """
-    Load data from a .zst (Zstandard-compressed) file.
+    Load data from a .zst file compressed with pickle + zstandard.
 
     Args:
         filepath (str): Path to the .zst file.
-        dataframe (bool): If True, expects a pickled pandas DataFrame.
-                          If False, expects JSON or NumPy-compatible structure.
 
     Returns:
-        Loaded data (dict, np.ndarray, or pd.DataFrame)
+        The unpickled Python object (np.ndarray, dict, pd.DataFrame, etc.).
     """
     with open(filepath, 'rb') as f:
         dctx = zstd.ZstdDecompressor()
         with dctx.stream_reader(f) as reader:
             decompressed = reader.read()
 
-    if dataframe:
-        return pickle.loads(decompressed)
+    return pickle.loads(decompressed)
 
-    try:
-        return json.loads(decompressed.decode('utf-8'))
-    except UnicodeDecodeError:
-        return np.load(decompressed, allow_pickle=True)
+# -----------------------------------------------------------------------------------------------------------------------
+
+def load_general_object_zst_auto_chunk(load_dir, prefix="data"):
+    """
+    Load and reconstruct object saved with save_general_object_zst_auto_chunk.
+
+    Args:
+        load_dir: Directory containing chunks and metadata.
+        prefix: File prefix.
+
+    Returns:
+        Reconstructed Python object.
+    """
+    load_dir = Path(load_dir)
+
+    # Load metadata
+    meta_path = load_dir / f"{prefix}_meta.zst"
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Missing metadata: {meta_path}")
+
+    with open(meta_path, "rb") as f:
+        dctx = zstd.ZstdDecompressor()
+        with dctx.stream_reader(f) as reader:
+            meta = pickle.load(reader)
+
+    # Read all chunks in order
+    data = bytearray()
+    for i in range(meta["total_chunks"]):
+        chunk_path = load_dir / f"{prefix}_chunk_{i:04d}.zst"
+        if not chunk_path.exists():
+            raise FileNotFoundError(f"Missing chunk: {chunk_path}")
+        with open(chunk_path, "rb") as f:
+            with zstd.ZstdDecompressor().stream_reader(f) as reader:
+                while True:
+                    chunk = reader.read(16384)
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+
+    # Deserialize
+    obj = pickle.loads(data)
+    print(f"✅ Successfully loaded object with type: {type(obj).__name__}")
+    return obj
+
 
 # -----------------------------------------------------------------------------------------------------------------------
 
@@ -781,7 +951,51 @@ def align_data_around_event(data, event_times, before, after, fs=1000, nan_paddi
 
     return aligned_data, time_vector
 
+# -----------------------------------------------------------------------------------------------------------------------
 
+def align_wavelet_data_around_event(wavelet_data, event_times, before, after, fs=1000, nan_padding=True):
+    """
+    Aligns a list of wavelet-transformed data arrays around event times.
+
+    Each element in `wavelet_data` is a 3D array (channels, frequencies, time).
+    The time dimension may differ across trials.
+
+    Args:
+        wavelet_data (List[np.ndarray]): List of 3D arrays (channels, frequencies, time), one per trial.
+        event_times (np.ndarray): Event times in milliseconds for each trial (len must match wavelet_data).
+        before (int): Time before event in ms.
+        after (int): Time after event in ms.
+        fs (int): Sampling frequency in Hz.
+        nan_padding (bool): Whether to pad with NaNs (default: True).
+
+    Returns:
+        List[np.ndarray]: List of aligned wavelet data (channels, frequencies, aligned_time).
+        np.ndarray: Common time vector (float32).
+    """
+    aligned_data = []
+    time_vector = np.linspace(-before, after, int((before + after) * fs / 1000), dtype=np.float32)
+    total_samples = len(time_vector)
+
+    for trial_idx, (trial_wav, evt_ms) in enumerate(zip(wavelet_data, event_times)):
+        ch, f, t = trial_wav.shape
+        aligned_trial = np.full((ch, f, total_samples), np.nan, dtype=np.float32)
+
+        evt_idx = int(round(evt_ms * fs / 1000))
+        before_samples = int(before * fs / 1000)
+        after_samples = int(after * fs / 1000)
+
+        start_idx = max(0, evt_idx - before_samples)
+        end_idx = min(t, evt_idx + after_samples)
+
+        buffer_start = max(0, before_samples - evt_idx)
+        buffer_end = buffer_start + (end_idx - start_idx)
+
+        # Copy valid range
+        aligned_trial[:, :, buffer_start:buffer_end] = trial_wav[:, :, start_idx:end_idx]
+
+        aligned_data.append(aligned_trial)
+
+    return aligned_data, time_vector
 # -----------------------------------------------------------------------------------------------------------------------
 
 def compute_psd(data, fs=1000, freq_range=(0, 90), multi_processing=-2, nperseg=2000):
@@ -1151,43 +1365,59 @@ def concatenate_trials_without_nan(data):
 
 def reconstruct_trials_from_time_info(continuous_data, trial_start_times, trial_durations, sampling_rate):
     """
-    Reconstruct trials from a continuous signal using trial start times and durations, ensuring float32 dtype.
+    Reconstruct trials from continuous LFP or wavelet data using start times and durations.
 
     Parameters:
-    - continuous_data (ndarray): Shape (channels, total_time_points), the concatenated data.
-    - trial_start_times (list or ndarray): Start time of each trial in milliseconds.
-    - trial_durations (list or ndarray): Duration of each trial (relative to start) in milliseconds.
-    - sampling_rate (int): Sampling rate in Hz.
+        continuous_data: np.ndarray
+            - LFP shape: (n_channels, total_time)
+            - Wavelet shape: (n_channels, n_freqs, total_time)
+        trial_start_times: array-like, in milliseconds
+        trial_durations: array-like, in milliseconds
+        sampling_rate: int, in Hz
 
     Returns:
-    - reconstructed_data (ndarray): Shape (num_trials, num_channels, max_trial_length), with NaN padding (float32).
+        - If LFP: np.ndarray of shape (n_trials, n_channels, max_trial_length)
+        - If wavelet: list of arrays, each of shape (n_channels, n_freqs, trial_len)
     """
-    # Ensure inputs are float32 **ONCE**
     continuous_data = np.asarray(continuous_data, dtype=np.float32)
     trial_start_times = np.asarray(trial_start_times, dtype=np.float32)
     trial_durations = np.asarray(trial_durations, dtype=np.float32)
 
-    num_channels, total_time_points = continuous_data.shape
+    # Ensure input is 2D (channels x time)
+    continuous_data = np.atleast_2d(continuous_data).astype(np.float32)
+
+    is_wavelet = continuous_data.ndim == 3
+
+    if is_wavelet:
+        n_channels, n_freqs, total_time_points = continuous_data.shape
+    else:
+        n_channels, total_time_points = continuous_data.shape
+
     num_trials = len(trial_start_times)
 
-    # Convert times to sample indices (ensure integer indices)
+    # Convert ms to sample indices
     trial_start_indices = np.round(trial_start_times * sampling_rate / 1000).astype(int)
     trial_durations_samples = np.round(trial_durations * sampling_rate / 1000).astype(int)
     trial_end_indices = trial_start_indices + trial_durations_samples
-
-    # Find the max trial length (in samples) for consistent padding
     max_trial_length = np.max(trial_durations_samples)
 
-    # Initialize output array with NaNs in float32
-    reconstructed_data = np.full((num_trials, num_channels, max_trial_length), np.nan, dtype=np.float32)
-
-    # Extract and assign data efficiently
-    for i in range(num_trials):
-        start_idx, end_idx = trial_start_indices[i], trial_end_indices[i]
-        trial_length = end_idx - start_idx
-        reconstructed_data[i, :, :trial_length] = continuous_data[:, start_idx:end_idx]
+    if is_wavelet:
+        reconstructed_data = []
+        for i in range(num_trials):
+            start_idx, end_idx = trial_start_indices[i], trial_end_indices[i]
+            trial = continuous_data[:, :, start_idx:end_idx]
+            reconstructed_data.append(trial.astype(np.float32))
+    else:
+        reconstructed_data = np.full(
+            (num_trials, n_channels, max_trial_length), np.nan, dtype=np.float32
+        )
+        for i in range(num_trials):
+            start_idx, end_idx = trial_start_indices[i], trial_end_indices[i]
+            trial_len = end_idx - start_idx
+            reconstructed_data[i, :, :trial_len] = continuous_data[:, start_idx:end_idx]
 
     return reconstructed_data
+
 
 
 # -----------------------------------------------------------------------------------------------------------------------
@@ -1290,28 +1520,32 @@ def compute_sliding_psd(data, fs=1000, freq_range=(1, 120), window_size=200, ste
         nb_trials, nb_channels, data_points = data.shape
         data = data.reshape(nb_trials * nb_channels, data_points)  # Flatten trials & channels for parallel processing
         mode_3D = True
+        sample_data = data[0, :int(window_size*(fs/1000))]
     elif data.ndim == 2:
         nb_channels, data_points = data.shape
         mode_3D = False
+        sample_data = data[0, :int(window_size * (fs / 1000))]
     elif data.ndim == 1:
         data_points = data.shape[0]
         mode_3D = False
+        sample_data = data[:int(window_size * (fs / 1000))]
     else:
         raise TypeError("The input data must be 1D, 2D, or 3D.")
 
     # Compute time points
     time_points = np.arange(0, data_points - window_size, step_size, dtype=np.float32) / fs
-
+    f, _ = welch(sample_data, fs=fs, nperseg=min(len(sample_data), nperseg))
+    del sample_data
     # Prepare arguments for multiprocessing
     args = [(trial, fs, freq_range, window_size, step_size, nperseg) for trial in data]
 
     # Compute PSD with or without multiprocessing
     if multi_processing == 0:
-        print("Processing sequentially (no multiprocessing)...")
+        # print("Processing sequentially (no multiprocessing)...")
         results = [process_sliding_psd(arg) for arg in tqdm(args, total=len(args), desc="Sliding PSD computation")]
     else:
         num_workers = max(1, os.cpu_count() - 1 if multi_processing == -2 else os.cpu_count())
-        print(f"Applying Sliding PSD with {num_workers} workers...")
+        # print(f"Applying Sliding PSD with {num_workers} workers...")
         with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
             results = list(tqdm(executor.map(process_sliding_psd, args),
                                 total=len(args), desc="Sliding PSD computation"))
@@ -1323,7 +1557,7 @@ def compute_sliding_psd(data, fs=1000, freq_range=(1, 120), window_size=200, ste
     if mode_3D:
         results = results.reshape(nb_trials, nb_channels, *results.shape[1:])
 
-    return results, results[0][1].astype(np.float32), time_points
+    return results, f, time_points
 
 
 # -----------------------------------------------------------------------------------------------------------------------
@@ -1456,85 +1690,12 @@ def band_remove_filter(data, band, fs=1000, filter_type="iir", order=4, multipro
 
 # -----------------------------------------------------------------------------------------------------------------------
 
-# def compute_trial_condition_rate(
-#         start_trials: np.ndarray,
-#         trial_durations: np.ndarray,
-#         trial_condition_mask: np.ndarray,  # ✅ Renamed for clarity
-#         window_length: float = 30.0,
-#         window_type: str = "gaussian",
-#         unit_time: str = "sec",
-#         resolution: float = 0.1,
-# ) -> tuple[np.ndarray, np.ndarray]:
-#     """
-#     Compute time-resolved rate of trials that match a given condition.
-#
-#     Parameters:
-#     - start_trials (np.ndarray): Start times of trials in milliseconds or seconds.
-#     - trial_durations (np.ndarray): Durations of trials in milliseconds or seconds.
-#     - trial_condition_mask (np.ndarray): Boolean mask (0 or 1) indicating whether a trial matches the condition.
-#     - window_length (float): Length of the smoothing window in seconds (default: 30.0 sec).
-#     - window_type (str): Type of the smoothing window ("gaussian" or "square").
-#     - unit_time (str): "ms" (convert to sec) or "sec" (default).
-#     - resolution (float): Time step resolution in seconds (default: 0.1 sec).
-#
-#     Returns:
-#     - time_points (np.ndarray): Time points corresponding to the computed rates.
-#     - trial_condition_rate (np.ndarray): Time-resolved rate of trials matching the condition.
-#     """
-#     # Convert to seconds if needed
-#     if unit_time == "ms":
-#         start_trials = start_trials.astype(np.float32) / 1000.0
-#         trial_durations = trial_durations.astype(np.float32) / 1000.0
-#         window_length /= 1000.0
-#         resolution /= 1000.0
-#     else:
-#         start_trials = start_trials.astype(np.float32)
-#         trial_durations = trial_durations.astype(np.float32)
-#
-#     # Filter trials that match the condition
-#     matching_trials = trial_condition_mask.astype(bool)
-#     start_trials = start_trials[matching_trials]
-#     trial_durations = trial_durations[matching_trials]
-#
-#     # Handle edge case: No trials match the condition
-#     if len(start_trials) == 0:
-#         time_points = np.arange(0, 1, resolution, dtype=np.float32)  # Dummy time axis
-#         return time_points, np.zeros_like(time_points, dtype=np.float32)
-#
-#     # Define time axis
-#     time_min = np.min(start_trials)
-#     time_max = np.max(start_trials + trial_durations)
-#     time_points = np.arange(time_min, time_max, resolution, dtype=np.float32)
-#
-#     # Create event array (vectorized approach)
-#     trial_events = np.zeros_like(time_points, dtype=np.float32)
-#     for t_start, t_duration in zip(start_trials, trial_durations):
-#         trial_mask = (time_points >= t_start) & (time_points < t_start + t_duration)
-#         trial_events += trial_mask.astype(np.float32)  # ✅ Vectorized update
-#
-#     # Create smoothing window
-#     window_size = int(window_length / resolution)
-#     if window_type == "gaussian":
-#         window = gaussian(window_size, std=window_size / 6)
-#     elif window_type == "square":
-#         window = np.ones(window_size, dtype=np.float32)
-#     else:
-#         raise ValueError("Unsupported window type. Use 'gaussian' or 'square'.")
-#
-#     window /= np.sum(window)  # Normalize
-#
-#     # Convolve to smooth rate
-#     trial_condition_rate = convolve(trial_events, window, mode='same', method='auto')
-#
-#     return time_points, trial_condition_rate.astype(np.float32)
-
-
 def compute_trial_condition_rate(
         start_trials: np.ndarray,
         trial_durations: np.ndarray,
         trial_condition_mask: np.ndarray,
         window_length: float = 60000.0,  # in ms
-        window_type: str = "gaussian",
+        window_type: str = "gaussian",  # Default changed to "hanning"
         output_fs: float = 1.0,  # Hz
         data_dur: float = None  # Total duration of data in ms (optional)
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -1546,7 +1707,7 @@ def compute_trial_condition_rate(
     - trial_durations (np.ndarray): Trial durations in ms.
     - trial_condition_mask (np.ndarray): Boolean mask (0 or 1) for matching trials.
     - window_length (float): Smoothing window length in ms (default: 60000 ms).
-    - window_type (str): "gaussian" or "square".
+    - window_type (str): "hanning", "gaussian", or "square".
     - output_fs (float): Output sampling frequency in Hz (default: 1 Hz).
     - data_dur (float or None): Total duration of data in ms (optional).
 
@@ -1582,15 +1743,16 @@ def compute_trial_condition_rate(
 
     # Create smoothing window
     window_size = int(window_length / resolution)
-    if window_size < 1:
-        window_size = 1
+    window_size = max(window_size, 1)
 
     if window_type == "gaussian":
         window = gaussian(window_size, std=window_size / 6)
     elif window_type == "square":
         window = np.ones(window_size, dtype=np.float32)
+    elif window_type == "hanning":
+        window = windows.hann(window_size, sym=True)
     else:
-        raise ValueError("Unsupported window type. Use 'gaussian' or 'square'.")
+        raise ValueError("Unsupported window type. Use 'hanning', 'gaussian', or 'square'.")
 
     window /= np.sum(window)
 
@@ -1598,6 +1760,7 @@ def compute_trial_condition_rate(
     trial_condition_rate = convolve(trial_events, window, mode='same', method='auto')
 
     return time_points, trial_condition_rate.astype(np.float32)
+
 # -----------------------------------------------------------------------------------------------------------------------
 def compute_superlet(data, fs=1000, base_cycle=3, min_order=1, max_order=10,
                      mode='mul', multi_processing=-2, freq_range=None, freq_res=None,
@@ -1660,3 +1823,47 @@ def compute_superlet(data, fs=1000, base_cycle=3, min_order=1, max_order=10,
 
     return results, freqs.astype(np.float32), times.astype(np.float32)
 # -----------------------------------------------------------------------------------------------------------------------
+
+def align_wavelet_around_event(data, event_times, before, after, fs=1000, nan_padding=True):
+    """
+    Aligns 4D wavelet data (trials, channels, freqs, time) around event times.
+
+    Args:
+        data (np.ndarray): 4D array with shape (trials, channels, freqs, time)
+        event_times (np.ndarray): 1D array of event times in milliseconds (one per trial)
+        before (int): Time before event (ms)
+        after (int): Time after event (ms)
+        fs (int): Sampling frequency in Hz (default 1000)
+        nan_padding (bool): Whether to pad with NaNs if window exceeds bounds (default: True)
+
+    Returns:
+        aligned_data (np.ndarray): Shape (trials, channels, freqs, aligned_time)
+        time_vector (np.ndarray): Time vector centered around event (float32)
+    """
+    assert data.ndim == 4, "Input data must be 4D: (trials, channels, freqs, time)"
+    n_trials, n_channels, n_freqs, n_timepoints = data.shape
+
+    event_times = np.asarray(event_times)
+    before_samples = int(before * fs / 1000)
+    after_samples = int(after * fs / 1000)
+    total_samples = before_samples + after_samples
+
+    aligned_data = np.full(
+        (n_trials, n_channels, n_freqs, total_samples),
+        np.nan,
+        dtype=np.float32
+    )
+
+    time_vector = np.linspace(-before, after, total_samples, dtype=np.float32)
+
+    for trial_idx, event_time in enumerate(event_times):
+        event_idx = int(round(event_time * fs / 1000))
+        start_idx = max(0, event_idx - before_samples)
+        end_idx = min(n_timepoints, event_idx + after_samples)
+
+        buffer_start = max(0, before_samples - event_idx)
+        buffer_end = buffer_start + (end_idx - start_idx)
+
+        aligned_data[trial_idx, :, :, buffer_start:buffer_end] = data[trial_idx, :, :, start_idx:end_idx]
+
+    return aligned_data, time_vector
